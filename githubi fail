@@ -1,7 +1,7 @@
 #!/bin/bash
 
 read -p "Sisesta failinimi: " failn
-read .p "Sisesta sõnum: " tekst
+read -p "Sisesta sõnum: " tekst
 
 sudo git add $failn
 sudo git commit -m "$tekst"
