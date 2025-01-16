@@ -1,0 +1,113 @@
+#!/bin/bash
+
+# pfSense varundamise skript
+# Autor: Mr Xhark -> @xhark
+# Kohandatud: Mirja
+# Skript varundab pfSense konfiguratsiooni XML-failina
+
+VERSION="2024.03.11_cURL"
+RUNDIR="$( cd "$( dirname "$0" )" && pwd )"
+
+##############################
+######### MUUTUJAD ##########
+
+# pfSense host või IP (ilma lõpus oleva '/'-ta)
+PFSENSE_HOST=https://192.168.1.3
+
+# pfSense kasutajanimi ja parool
+PFSENSE_USER='backup'
+PFSENSE_PASS='2013nooruse5'
+
+# Jäta tühjaks, kui XML-faili ei pea krüpteerima
+BACKUP_PASSWORD=''
+
+# Kui väärtus on 1, ignoreeritakse SSL-i vigu (nt isesigneeritud sertifikaadid)
+HTTPS_INSECURE=1
+
+# Varundamise valikud
+BACKUP_SSHKEY=1
+BACKUP_PKGINFO=1
+BACKUP_EXTRADATA=1
+BACKUP_RRD=0
+
+# Varunduse asukoht
+BACKUP_DIR="$RUNDIR/conf_backup"
+
+######## MUUTUJATE LÕPP ########
+###############################
+
+############################################
+####### ÄRGE MUUTKE ALLPOOL OLEVAT #########
+
+# Kontrollime, kas saab minna /tmp kausta
+cd /tmp || { echo "Ei saanud minna /tmp kausta. Skript katkestatakse."; exit 1; }
+
+echo
+echo "*** pfSense varundamise skript (versioon $VERSION) ***"
+echo
+
+# Kontrollime, kas cURL on olemas
+curl -V $PFSENSE_HOST >/dev/null 2>&1 || { echo "VIGA: cURL peab olema paigaldatud."; exit 1; }
+
+# Ajutised failid
+COOKIE_FILE="$(mktemp /tmp/pfsbck.XXXXXXXX)"
+CSRF1_TOKEN="$(mktemp /tmp/csrf1.XXXXXXXX)"
+CSRF2_TOKEN="$(mktemp /tmp/csrf2.XXXXXXXX)"
+CONFIG_TMP="$(mktemp /tmp/config-tmp-xml.XXXXXXXX)"
+
+# Tühistame muutujad
+unset CERT RRD PKGINFO EXTRADATA SSHKEY PW
+
+# SSL-i vigade ignoreerimine
+if [ "$HTTPS_INSECURE" = "1" ]; then CERT="--insecure"; fi
+if [ "$BACKUP_RRD" = "0" ]; then RRD="&donotbackuprrd=yes"; fi
+if [ "$BACKUP_PKGINFO" = "0" ]; then PKGINFO="&nopackages=yes"; fi
+if [ "$BACKUP_EXTRADATA" = "1" ]; then EXTRADATA="&backupdata=yes"; fi
+if [ "$BACKUP_SSHKEY" = "1" ]; then SSHKEY="&backupssh=yes"; fi
+if [ -n "$BACKUP_PASSWORD" ]; then 
+    PW="&encrypt=yes&encrypt_password=${BACKUP_PASSWORD}&encrypt_password_confirm=${BACKUP_PASSWORD}"
+fi
+
+# Loome varundamise kausta
+mkdir -p "$BACKUP_DIR"
+
+# Logime sisse ja saame CSRF tokenid
+curl -Ss --noproxy '*' $CERT --cookie-jar "$COOKIE_FILE" "$PFSENSE_HOST/diag_backup.php" \
+  | grep "name='__csrf_magic'" | sed 's/.*value="\(.*\)".*/\1/' > "$CSRF1_TOKEN" \
+  || { echo "VIGA: CSRF tokeni hankimine ebaõnnestus."; exit 1; }
+
+curl -Ss --noproxy '*' $CERT --location --cookie-jar "$COOKIE_FILE" --cookie "$COOKIE_FILE" \
+  --data "login=Login&usernamefld=${PFSENSE_USER}&passwordfld=${PFSENSE_PASS}&__csrf_magic=$(cat "$CSRF1_TOKEN")" \
+ "$PFSENSE_HOST/diag_backup.php"  | grep "name='__csrf_magic'" \
+  | sed 's/.*value="\(.*\)".*/\1/' > "$CSRF2_TOKEN" \
+  || { echo "VIGA: Sisselogimine ebaõnnestus."; exit 1; }
+
+# Laeme alla XML-konfiguratsiooni
+XMLFILENAME=$(curl -sS -OJ --noproxy '*' $CERT --cookie-jar "$COOKIE_FILE" --cookie "$COOKIE_FILE" \
+  --data "Submit=download&download=download${RRD}${PKGINFO}${EXTRADATA}${SSHKEY}${PW}&__csrf_magic=$(head -n 1 "$CSRF2_TOKEN")" \
+  --write-out "%{filename_effective}" "$PFSENSE_HOST/diag_backup.php" \
+  || { echo "VIGA: Faili lugemine ebaõnnestus."; exit 1; })
+
+# Kontrollime, kas sisselogimine õnnestus
+if grep -qi 'username or password' "$CONFIG_TMP"; then
+    echo "VIGA: Vale kasutajanimi või parool ($PFSENSE_HOST)."
+    rm -f "$CONFIG_TMP"
+    exit 1
+fi
+
+# Kontrollime, kas URL on korrektne
+if grep -qi 'doctype html' "$CONFIG_TMP"; then
+    echo "VIGA: Kontrollige URL-i ($PFSENSE_HOST)."
+    rm -f "$CONFIG_TMP"
+    exit 1
+fi
+
+# Salvestame lõpliku varundusfaili
+mv "/tmp/${XMLFILENAME}" "$BACKUP_DIR" && echo "Varundamine õnnestus: ${BACKUP_DIR}/${XMLFILENAME}" \
+  || echo "Varundamine ebaõnnestus!"
+
+# Puhastame ajutised failid
+rm -f "$COOKIE_FILE" "$CSRF1_TOKEN" "$CSRF2_TOKEN"
+
+echo "Skript lõpetatud."
+exit 0
